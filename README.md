@@ -110,7 +110,7 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 
 * [`k_meter/k2.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2.py)
   * **Description**: Next-generation render-clock phase-locked shot release engine for the **Arrow 2** shot meter style.
-  * **Theory**: NBA 2K26 updates the shot meter once per rendered frame, creating a discrete staircase fill rather than a continuous line. `k2.py` fits the step transitions ($t_k = t_0 + k \cdot T$) using least-squares regression, estimates the pixel step size, and calculates the exact crossing frame $K = \lceil\text{target}/\text{step\_px}\rceil$.
+  * **Theory**: NBA 2K26 updates the shot meter once per rendered frame, creating a discrete staircase fill rather than a continuous line. `k2.py` fits the step transitions `t_k = t0 + k * T` using least-squares regression, estimates the pixel step size, and calculates the exact crossing frame `K = ceil(target / step_px)`.
   * **Features**: Includes built-in benchmark self-tests (`--selftest`) and offline video frame evaluation (`--dump`).
 
 * [`k_meter/k2_runtime.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2_runtime.py)
