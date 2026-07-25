@@ -27,7 +27,7 @@ This repository provides both **hardware-level timing interception** (Keyboard &
 ---
 
 > [!NOTE]
-> **Meter Target Specification**: The vision tracking algorithms (`k_meter/` suite) are specifically built, calibrated, and tuned for the **"Arrow 2"** shot meter style with **Purple** meter color (horizontal purple fill bar racing into the green tick window at the tip).
+> **Meter Target Specification**: The vision tracking algorithms (`k_meter/` suite) are specifically built, calibrated, and tuned for the **"Arrow 2"** shot meter style with **Purple** meter color located **below the player's feet** (horizontal purple fill bar racing into the green tick window at the tip).
 
 Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, jump shot animations, stamina depletion, and render frame pacing all affect the release window. This repository provides a multi-tiered approach:
 
@@ -107,7 +107,7 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 ### 3. Vision & Phase-Locked Suite (`k_meter/`)
 
 > [!IMPORTANT]
-> All vision algorithms, HSV thresholds, ROI search boxes, and geometric target ratios (`arrow_ratio`) inside the `k_meter/` directory are specifically calibrated and designed for the **"Arrow 2"** shot meter style in NBA 2K26 (horizontal purple fill bar racing into the green tick window at the bar's tip).
+> All vision algorithms, HSV thresholds, ROI search boxes, and geometric target ratios (`arrow_ratio`) inside the `k_meter/` directory are specifically calibrated and designed for the **"Arrow 2"** shot meter style in NBA 2K26 (with **Purple** meter color, positioned **below the player's feet**, where the horizontal purple fill bar races into the green tick window at the bar's tip).
 
 * [`k_meter/k2.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2.py)
   * **Description**: Next-generation render-clock phase-locked shot release engine for the **Arrow 2** shot meter style.
