@@ -26,14 +26,15 @@ This repository provides both **hardware-level timing interception** (Keyboard &
 
 ---
 
-## 🏀 Overview & Architecture
+> [!NOTE]
+> **Meter Target Specification**: The vision tracking algorithms (`k_meter/` suite) are specifically built, calibrated, and tuned for the **"Arrow 2"** shot meter style with **Purple** meter color (horizontal purple fill bar racing into the green tick window at the tip).
 
 Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, jump shot animations, stamina depletion, and render frame pacing all affect the release window. This repository provides a multi-tiered approach:
 
 1. **Fixed Precision Engine**: Suppresses physical key/button releases and injects synthetic releases using Windows high-resolution waitable timers (`CreateWaitableTimerExW`) and busy-spin sub-ms stabilization.
 2. **Virtual Controller Injection**: Emulates an Xbox 360 controller via `vgamepad` and `ViGEmBus`, executing precise stick-down gather and upward flick release sequence while mirroring all other inputs.
 3. **Closed-Loop Realtime Tuning**: Uses Windows OCR (`winrt`) to read game feedback banners (*"Rushed"*, *"Slightly Rushed"*, *"Great Tempo"*, *"Slightly Late"*) and automatically adjusts hold parameters dynamically on the fly.
-4. **Phase-Locked Render Clock Fitting**: Models the 2K26 shot meter as a staircase function of rendered frames, performing least-squares linear fits to predict exact frame crossing times and overcome video capture jitter.
+4. **Phase-Locked Render Clock Fitting**: Models the 2K26 **Arrow 2 (Purple)** shot meter as a staircase function of rendered frames, performing least-squares linear fits to predict exact frame crossing times and overcome video capture jitter.
 
 ```
                     ┌─────────────────────────────────────────┐
