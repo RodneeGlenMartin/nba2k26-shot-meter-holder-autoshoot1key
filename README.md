@@ -105,8 +105,11 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 
 ### 3. Vision & Phase-Locked Suite (`k_meter/`)
 
+> [!IMPORTANT]
+> All vision algorithms, HSV thresholds, ROI search boxes, and geometric target ratios (`arrow_ratio`) inside the `k_meter/` directory are specifically calibrated and designed for the **"Arrow 2"** shot meter style in NBA 2K26 (horizontal purple fill bar racing into the green tick window at the bar's tip).
+
 * [`k_meter/k2.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2.py)
-  * **Description**: Next-generation render-clock phase-locked shot release engine.
+  * **Description**: Next-generation render-clock phase-locked shot release engine for the **Arrow 2** shot meter style.
   * **Theory**: NBA 2K26 updates the shot meter once per rendered frame, creating a discrete staircase fill rather than a continuous line. `k2.py` fits the step transitions ($t_k = t_0 + k \cdot T$) using least-squares regression, estimates the pixel step size, and calculates the exact crossing frame $K = \lceil\text{target}/\text{step\_px}\rceil$.
   * **Features**: Includes built-in benchmark self-tests (`--selftest`) and offline video frame evaluation (`--dump`).
 
@@ -115,7 +118,7 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
   * **Mechanism**: Monitors game window focus, manages low-latency screen capture via `mss`, continuously feeds frame observations into `StaircaseClock`, and executes scancode key releases via Win32 `SendInput`.
 
 * [`k_meter/k_meter.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k_meter.py)
-  * **Description**: Vision-assisted keyboard auto-shot release tool (v1.2).
+  * **Description**: Vision-assisted keyboard auto-shot release tool for **Arrow 2** shot meter (v1.2).
   * **Mechanism**: Tracks the horizontal purple meter fill racing into the green tick at the bar's tip using OpenCV HSV color space bounds. Implements velocity-based latency compensation and safe fallback timers.
   * **Controls**: Operates via `Ctrl+Alt` hotkey combinations to avoid accidental keypresses.
 
@@ -124,9 +127,9 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
   * **Mechanism**: Uses OpenCV `cv2.dnn` to run a COCO-pretrained YOLOv4 ONNX model (without requiring PyTorch or ONNX Runtime). Evaluates player detection accuracy and jersey color classification on court.
 
 * [`k_meter/k2.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2.json)
-  * Configuration file for `k2.py` and `k2_runtime.py`. Controls `latency_ms`, `arrow_ratio`, `hold_ms`, `min_steps`, `spin_ms`, and `no_meter_ms`.
+  * Configuration file for `k2.py` and `k2_runtime.py`. Controls `latency_ms`, `arrow_ratio` (calibrated for Arrow 2 green tip geometry), `hold_ms`, `min_steps`, `spin_ms`, and `no_meter_ms`.
 * [`k_meter/k_meter.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k_meter.json)
-  * Configuration file for `k_meter.py`. Controls HSV color bounds, ROI search boxes, lead times, and action key definitions.
+  * Configuration file for `k_meter.py`. Controls Arrow 2 HSV color bounds, ROI search boxes, lead times, and action key definitions.
 * [`k_meter/run_k2.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/run_k2.bat)
   * Windows batch launcher for starting `k2_runtime.py`.
 * [`k_meter/run_k_meter.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/run_k_meter.bat)
