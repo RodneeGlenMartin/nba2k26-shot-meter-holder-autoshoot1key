@@ -1,0 +1,8 @@
+{
+    "action_key": "k",
+    "hold_ms": 560,
+    "release_offset_ms": 0,
+    "tune_step_ms": 5,
+    "spin_margin_ms": 3,
+    "debug": false
+}

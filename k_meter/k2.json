@@ -1,0 +1,15 @@
+{
+  "action_key": "k",
+  "game_window": "NBA 2K26",
+  "latency_ms": 71.0,
+  "arrow_ratio": 1.022,
+  "hold_ms": 650,
+  "no_meter_ms": 550,
+  "max_hold_ms": 1200,
+  "min_steps": 6,
+  "min_lead_ms": 10.0,
+  "spin_ms": 3.0,
+  "force_mss": false,
+  "debug": true,
+  "snap_to_frame": false
+}

@@ -1,0 +1,27 @@
+==============================================================
+  TempoLearn report — 2026-07-18 07-21-29
+==============================================================
+  Shots detected : 32
+  Tempo verdicts:
+      Rushed             2  (   7%)
+      Slightly Rushed    3  (  10%)
+      Great             24  (  80%)
+      Slow               1  (   3%)
+  Timing verdicts:
+      Slightly Early     1  (   3%)
+      Great             26  (  84%)
+      Slightly Late      4  (  13%)
+--------------------------------------------------------------
+  Great-tempo rate : 80%
+  Learned correction: +1.5 ms (raise hold_ms)
+  (positive = shots graded rushed on average -> hold longer)
+--------------------------------------------------------------
+  Trend (5-min buckets, avg implied correction):
+      0-5   min   15 shots   +2.4 ms  rushed #
+      5-10  min    6 shots   +0.0 ms  even   
+     10-15  min    6 shots   +3.3 ms  rushed ##
+     15-20  min    1 shots   +8.0 ms  rushed ####
+     20-25  min    2 shots  -10.0 ms  slow   #####
+--------------------------------------------------------------
+  Shot list: D:\Users\rodnee\Desktop\Dev\zxc\tempo_learn_out\2026-07-18 07-21-29.shots.csv
+==============================================================

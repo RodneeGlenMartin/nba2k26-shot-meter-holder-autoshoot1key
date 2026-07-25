@@ -1,0 +1,18 @@
+{
+    "trigger_button": 3,
+    "hold_ms": 555,
+    "release_offset_ms": 0,
+    "tune_step_ms": 5,
+    "spin_margin_ms": 3,
+    "flick_ms": 80,
+    "fatigue_offset_ms": 8,
+    "poll_hz": 1000,
+    "pad_index": -1,
+    "debug": true,
+    "meter_mode": true,
+    "meter_offset_ms": 0,
+    "meter_lead_ms": 40,
+    "game_window": "NBA 2K26",
+    "meter_max_ms": 1200,
+    "flick_ramp_ms": 40
+}

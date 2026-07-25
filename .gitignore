@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Log files & statistics runtime logs
+*.log
+pad_log.txt
+*_log.txt
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
