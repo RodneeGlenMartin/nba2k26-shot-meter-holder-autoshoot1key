@@ -1,4 +1,11 @@
-"""K-Meter — keyboard button-shot perfection from the purple meter.
+"""K-Meter (BUTTON BUILD) — keyboard button-shot perfection from the
+purple meter.
+
+This is the button-shot lineage, preserved alongside ../tempo/k_meter.py.
+Same vision engine; the only difference is the OUTPUT: this one holds K
+and releases K, the tempo build blocks K and flicks the pro stick. Run
+one or the other, never both — they share a single-instance mutex and
+both hook the same key.
 
 TAP K once. The physical press passes straight through to NBA 2K26 (the
 shot starts and the horizontal PURPLE meter appears), the physical
@@ -22,8 +29,9 @@ at `meter_max_ms` so the key can never stay held forever.
 
 Requires:  pip install keyboard opencv-python mss numpy
 Run as administrator (keyboard hook + game window focus).
-Do NOT run this at the same time as precision_timer_pad.py — both
-register F-key hotkeys.
+Do NOT run this at the same time as ../tempo/k_meter.py,
+precision_timer.py or precision_timer_pad.py — they register the same
+F-key hotkeys.
 
 Controls (all prefixed by `hotkey_prefix`, default Ctrl+Alt — bare
 F-keys collide with other tools and silently retune latency mid-game):
@@ -35,6 +43,11 @@ F-keys collide with other tools and silently retune latency mid-game):
 meter_offset_ms: ms after (positive) or before (negative) the fill
 reaches the tick. meter_lead_ms compensates capture/display latency.
 Both hot-reload from k_meter.json while running.
+
+NB the tuning here is the BUTTON tuning: latency_ms 24.5 with a
+time-based lead (lead_px 0), which is what 3/3 excellent shots were
+measured at. Do not copy the tempo build's numbers over — a stick flick
+goes through 2K's stick-input path and needs ~2.5x the lead.
 """
 
 from __future__ import annotations
@@ -61,7 +74,10 @@ try:
 except Exception:
     _VISION_OK = False
 
-__version__ = "1.2"      # 1.2: velocity-based latency compensation
+__version__ = "1.3b"     # 1.3b: button K-up output, carrying the lead_px
+#                                aim point and the one-frame room guard
+#                                back from the 1.4 tempo build
+#                          1.3: alpha-beta fill tracker, banded BGR search
 
 # --------------------------------------------------------------------------- #
 # Paths / crash logging / config
@@ -79,11 +95,104 @@ DEFAULT_CONFIG = {
     "action_key": "k",       # tap once; also the key held for the game
     "hold_ms": 650,          # fallback hold when the meter is never seen
     "no_meter_ms": 400,      # give up looking for the meter after this
-    "spin_margin_ms": 3.0,   # busy-wait window for sub-ms release accuracy
-    "latency_ms": 35,        # MAIN KNOB: pipeline lag to cancel
-    "release_pct": 97,       # backstop cap if speed can't be measured
+    # Busy-wait window for sub-ms release accuracy. MUST BE >= lookahead_ms.
+    #
+    # The old 1.0 ms came from a synthetic bench (p99 overshoot 0.55 ms) that
+    # does not survive contact with the game: 8 of 43 in-game shots landed
+    # 3-7.4 ms LATE. Raising it to 5 ms cut that to 1 of 19 — but that one
+    # still missed, overshooting by 10.3 ms, because the cause is not timer
+    # granularity. wait_until() BLOCKS until deadline-margin, and a blocked
+    # thread has to be rescheduled onto a core; on a saturated 6-core/
+    # 6-thread CPU that wake-up is the whole tail. The error is one-sided —
+    # waking early is spun away exactly, waking late is unrecoverable.
+    #
+    # So don't block at all. wait_s is provably <= lookahead_ms (lead_ready
+    # requires remain <= lead_px + v*look_ms, and wait_s = (remain-lead_px)/v),
+    # so a margin >= lookahead_ms makes `coarse` non-positive on every LEAD
+    # release and _coarse() is never called: pure spin, nothing to reschedule.
+    # Costs <=25 ms of one core ONCE PER SHOT (~0.6% duty at this shot rate).
+    "spin_margin_ms": 25.0,
+    # MAIN KNOB: pipeline lag to cancel — and, because of the way 2K samples
+    # input, the ONLY knob that controls which frame the release lands in.
+    #
+    # 2K polls K once per rendered frame, so the outcome is not the release
+    # instant, it is which poll catches it: n_rel = ceil((R - poll_offset)
+    # / frame). Every sub-millisecond of scheduling collapses out. Write
+    # k = (capture_lag - latency_ms - poll_offset) / frame; only frac(k)
+    # matters, and it is the SAME on every shot, because the fill only ever
+    # advances on frame boundaries — so the crossing time the tracker
+    # estimates is itself boundary-locked. Simulated flip rate against the
+    # +-2.5 ms of estimate noise these logs actually show:
+    #   frac(k) 0.02 -> 46%   0.10 -> 30%   0.24 -> 10%   0.50 -> 0.7%
+    # so the entire slightly-early/slightly-late residual is one number
+    # sitting too close to a boundary. Early flips mean frac(k) is just
+    # ABOVE 0; moving it to 0.5 means releasing half a frame LATER, i.e.
+    # latency_ms DOWN by frame/2 (20 -> 13.3 at frame 13.4).
+    #
+    # That shift is free, not a timing change: while frac(k) < 0.5 the same
+    # poll still catches the release (verified over the whole range), it just
+    # stops doing so by a hair. If it ever overshoots past 0.5 the symptom
+    # flips to consistently ONE FRAME LATE — that, not a vague drift, is the
+    # signal to put it back up.
+    #
+    # THIS IS THE BUTTON TUNING. 24.5 in k_meter.json is the value 3/3
+    # excellent shots were measured at, with bar_len_px 118.5 and a
+    # time-based lead. The tempo build needs ~2.5x more (it settled at 60)
+    # because a stick flick goes through 2K's stick-input path — do not
+    # copy numbers between the two builds in either direction.
+    #
+    # The whole derivation of that difference, the badge-labelled shot
+    # table behind it, and why [overshoot] cannot be used as an error
+    # signal, live in ../tempo/k_meter.py. Worth reading before retuning
+    # this one, because the two findings below came out of it and apply
+    # here too:
+    #   * lead_px pins the release to a fixed fill LENGTH, which removes
+    #     the fill-speed scatter that v*latency_ms builds in (~3.8 px over
+    #     v 0.27-0.34). Off here, at 0, because the button aim point was
+    #     validated in time-based mode — but it is the better shape, and
+    #     the button equivalent of 24.5 would be lead_px ~= 0.30*24.5 = 7.4.
+    #   * the one-frame room guard in _track (search `_room`) is a plain
+    #     bug fix and is ACTIVE here: without it the min_lead_pct floor can
+    #     let the trigger arrive past the release point, wait_s clamps to
+    #     0, and the shot fires late by however far the frame overshot.
+    "latency_ms": 35,        # per-rig; k_meter.json holds the live value
+    "lead_px": 0,
+    # Slow-fill correction on top of lead_px — inert here because it
+    # only applies when lead_px > 0, which this build leaves at 0.
+    # See ../tempo/k_meter.py for the derivation.
+    "lead_v_ref": 0.29,
+    "lead_v_gain": 150.0,
+    "lead_v_max": 6.0,
+    # Backstop cap for when speed can't be measured. Must stay clear of the
+    # LEAD release point or it preempts it and fires early: with the target
+    # fixed, CAP wins whenever v < (bar_len*(1-pct/100)+1)/latency_ms. At 97
+    # that is v<0.23 px/ms against an observed floor of 0.27 — too close. At
+    # 99 it is v<0.11, a real backstop again. Changes none of the 39 logged
+    # shots; it only stops a slow fill from silently taking the wrong path.
+    # NB latency_ms is the denominator, so cutting it RAISES this threshold:
+    # at 13.3 the cap fires below v<0.16, still 1.7x under the 0.27 floor.
+    "release_pct": 99,
     "min_lead_pct": 82,      # minimum percentage of fill before velocity-based release can trigger
-    "fast_min_lead_pct": 88, # same floor for fast fills (v >= 0.41)
+    # Same floor for fast fills (v >= 0.41). These floors fight the lead:
+    # the faster the fill, the earlier in the bar the earned release point
+    # sits, and whichever is LATER wins. At the jumpshot speeds this rig
+    # actually shoots (v 0.28-0.34) the gate is absorbed by wait_s and the
+    # release still lands exactly where the lead asks. Fast fills are the
+    # exception, and latency_ms 60 makes it worse: the earned release point
+    # drops below this floor, wait_s clamps at 0, and the flick fires late
+    # by 10.4 px at v 0.41 (~25 ms) and 15.8 px at v 0.50 (~32 ms).
+    #
+    # RESOLVED, and not by touching this number: the one-frame room guard in
+    # _track (search `_room`) now lowers whichever floor is in force until it
+    # clears the release point, so v 0.41 goes from a worst case of 109.0 px
+    # to 99.0 and v 0.50 from 110.1 to 99.0. Note both were WORSE than the
+    # 104.3 px a static reading of this floor predicts, because frame-phase
+    # overshoot stacks on top of the clip — which is exactly the term that
+    # static reading was missing. This value is left at 88 as the nominal
+    # floor; the guard relaxes it per shot only as far as the geometry
+    # requires, so it still does its real job of refusing a velocity release
+    # on a fill we have barely seen.
+    "fast_min_lead_pct": 88,
     "meter_offset_ms": 0,    # extra ms after that point (+ only, delays)
     "meter_lead_ms": 0,      # capture/display latency compensation
     "meter_max_ms": 1200,    # hard safety: never hold K longer than this
@@ -92,22 +201,149 @@ DEFAULT_CONFIG = {
     "hotkey_prefix": "ctrl+alt+",  # "" = bare F-keys (collides with other tools)
     "game_window": "NBA 2K26",
     "force_mss": True,       # force super stable CPU capture backend
-    "persistent_span": 118,  # fallback arrow length if tick span unseen
-    "arrow_ratio": 1.227,    # arrow-tip length / fill->tick span
-    "lookahead_ms": 25,      # sub-frame release scheduling window
+    "persistent_span": 118,  # crop hint: how far right of the fill to look
+    # THE release target: fill length, in px, at which the shot is perfect.
+    # Fixed on purpose. It used to be derived per shot from the "tick span"
+    # returned by _locate — but _locate never finds a tick (_find_tick is
+    # dead code), it returns `fill_left + persistent_span`, so that span was
+    # literally `118 - fill_width_at_the_frame_we_locked_on`. Locking one
+    # frame later shortened the target by ~5 px, and 39 logged shots spread
+    # the target over 111-121 px: 32 ms peak-to-peak of pure lock-timing
+    # noise, which is exactly the slightly-early/slightly-late split. 117 is
+    # the mean of that distribution (116.66 over those 39 shots), so the
+    # average shot times within ~1 ms of before and only the jitter is gone
+    # — and the rounding leans late, away from the one miss that was early.
+    #
+    # 117 was the mean of the old noisy distribution, and with latency_ms
+    # already parked at the frac(k)=0.5 mid-frame value it still released
+    # slightly early with no green tick — err +0.00 ms against its own
+    # schedule, so the schedule was right and the aim point was not. Phase is
+    # spent (moving latency_ms further walks frac(k) back toward a boundary
+    # and buys flips, not a shift), so the mean has to move here instead: one
+    # render frame of fill is v*frame = 0.31*13.4 ~= 4 px, hence 121. Changing
+    # the target does NOT disturb frame phase — frac(k) is built only from
+    # capture_lag/latency_ms/poll_offset/frame — which is exactly why this is
+    # the right knob for a mean shift.
+    #
+    # Four single-shot probes then bracketed it, and ordered by target the
+    # outcome is MONOTONE:
+    #     117 early (ph0.63) | 118 early (ph0.04) | 119 late (ph0.71) | 121 late (ph0.12)
+    # so the crossing lies strictly between 118 and 119 and the target — not
+    # frame phase — is what moves it. Note ph scattered over 0.04-0.71 across
+    # those four without breaking the ordering, which is the evidence AGAINST
+    # blaming phase here: if the input poll were choosing the outcome, the
+    # early/late labels would not sort by target.
+    #
+    # No integer can sit in that gap, hence the fraction. This is safe to
+    # write: _clamp_config only int()s a value when it is already integral,
+    # the release path reads it as float(), and the fill tracker is sub-pixel
+    # (see the `sub` and `abx` log fields), so 0.5 px survives end to end.
+    #
+    # VALIDATED: 118.5 then returned 3/3 "excellent" in-game, so this is a
+    # measured setting, not a bisection artifact. Do not move it without a
+    # comparable run behind the change.
+    #
+    # The tick_probe run also settled WHY a constant works here. The real
+    # target does move: tick_len measured 131 / 130 / 125 on those three
+    # shots, a 6 px spread, which is the actual source of the old
+    # early/late alternation — not a mistuned number. But all three were
+    # excellent at a FIXED 118.5 with delta ranging +6..+12 px, so the green
+    # window comfortably spans that wander. Retargeting per shot off the tick
+    # would therefore import 6 px of measurement spread into the release to
+    # chase a target the window already covers — strictly worse. The constant
+    # is the right shape; keep it.
+    "bar_len_px": 118.5,
+    "arrow_ratio": 1.227,    # legacy, only used when bar_len_px <= 0
+    # Sub-frame release scheduling window, and the only thing that absorbs
+    # a capture stall: the trigger cannot fire until remain <= lead_px +
+    # v*this, so too small a value lets a stalled frame land past the
+    # release point where wait_s clamps to 0 and the shot goes out late.
+    # 35 covers a 20 ms stall; the `_room` guard in _track must widen with
+    # it. Left at 25 here because the button aim point was validated at 25
+    # and this build is a preserved reference — raise both together if a
+    # `sched+0.0ms` LEAD line ever shows up in its log.
+    "lookahead_ms": 25,
     "v_lsq": True,           # fit v over ALL samples, not just two endpoints
     "v_long_weight": 0.75,   # weight of long-baseline fill speed vs 60ms window
     "stall_cap_ms": 20,      # frame gaps longer than this are capture stalls, not fill time
-    "frame_align": True,     # release at the CENTRE of a game frame
-    "game_frame_ms": 13.3,   # measured: this rig renders at 75 fps
+    # OFF, and not as a tuning preference — aligning cannot help. The game
+    # already quantizes the release itself (ceil to its next input poll), and
+    # snapping our instant to a grid UPSTREAM of that cannot undo a
+    # downstream quantization. Worked through with g = (capture_lag -
+    # poll_offset)/frame: snapping to frame centre changes the sampled frame
+    # for a fraction |g| of shots and leaves the rest bit-identical — 0%
+    # benefit at g=0, and a whole frame EARLY on 10/20/30% of shots at
+    # g=0.1/0.2/0.3. Its best case is a no-op and its normal case is added
+    # flips, which is what one round of it produced. Frame phase is
+    # latency_ms' job; see there.
+    "frame_align": False,
+    # Live-measured render period. Read this off the `fr` field in the log
+    # (median of n step gaps), never off `dt` — dt is the last gap alone, one
+    # noisy sample, and trusting it is what put this at 15.0 for a round.
+    # 22 gaps measure 13.4 ms with a 1.0 ms IQR, so 13.3 was right all along.
+    "game_frame_ms": 13.4,
     "subframe_fill": True,   # extrapolate across the game's 60fps staircase
     "step_cap_ms": 18,       # max extrapolation past the last observed step
     "autotune": True,        # self-correct latency_ms from measured overshoot
     "autotune_shots": 8,     # shots per correction batch (median of these)
     "autotune_deadband_ms": 6,  # ignore errors smaller than this
-    "autotune_target_ms": 12, # measured overshoot that means "centred"
+    # The overshoot a GREAT shot produces. Read the sign warning below
+    # before ever setting "autotune": true on the tempo build.
+    #
+    # On badge-labelled tempo shots [overshoot] is ANTI-CORRELATED with
+    # lateness — the later the shot, the SMALLER the reading:
+    #     +29 ms late | +31 ms late | +55 ms GREAT
+    # which is the exact opposite of what _autotune is built on ("positive
+    # means the fill overshot the target (late)"). With aim 55 and a late
+    # shot reading +29, err comes out NEGATIVE, the step lowers latency_ms,
+    # and the controller releases even LATER — it would run away from the
+    # target on every miss. That is why autotune stays off here, and it is
+    # a sign error, not a tuning preference: raising the aim does not fix a
+    # signal that moves the wrong way.
+    #
+    # `stopped` is where the fill's ANIMATION ended, not where the release
+    # registered, and 2K animates the meter according to the grade it just
+    # awarded: a good release runs the fill on past the tick (+18 px),
+    # while a late one has already hit the bar's end and retracts, so its
+    # reading saturates near the bar length (+8 px). The number is mostly
+    # an EFFECT of the outcome. Kept at the great shot's value so a stray
+    # enable sits near a no-op. Steer latency_ms by the badge.
+    "autotune_target_ms": 55,
     "trust_min_frames": 8,   # fewer tracked frames -> discard the sample
     "trust_min_span": 95,    # smaller meter read -> truncated, discard
+    # --- CPU budget -------------------------------------------------------
+    # This rig is a 6-core / 6-thread Ryzen 3500X: no SMT, so every core this
+    # tool takes is a core 2K26 does not get, and a dropped render frame
+    # costs far more timing accuracy than anything below buys.
+    "cv_threads": 1,         # OpenCV worker threads (0 = let OpenCV decide).
+                             # Every cvtColor/inRange/connectedComponents used
+                             # to fan out across all 6 cores at once.
+    "poll_sleep_ms": 0.8,    # yield this long when the backend has no new
+                             # frame, instead of spinning the core
+    "process_priority": "above_normal",   # normal | above_normal | high
+    "vision_priority": "above_normal",    # tracking thread; the final wait
+                                          # still boosts to time_critical
+    "post_measure_ms": 0,    # post-release overshoot sampling. Only feeds
+                             # autotune/autocal; 0 = off. Costs ~150 ms of
+                             # solid capture right as the shot animates.
+    # --- meter search -----------------------------------------------------
+    "mask_bgr": True,        # mask in the capture's own channels (no HSV)
+    "mag_rb_min": 160,       # magenta: blue AND red at least this
+    "mag_g_max": 105,        # magenta: green below this
+    "locate_band_lo": 0.60,  # search band, fraction of window height
+    "locate_band_hi": 0.90,
+    "locate_full_after_ms": 220,  # band came up empty this long -> whole window
+    # --- fill tracker -----------------------------------------------------
+    "v_filter": "ab",        # "ab" = alpha-beta tracker, "lsq" = the fit
+    "ab_alpha": 0.30,        # position gain
+    "ab_beta": 0.105,        # velocity gain
+    # One-shot green-tick measurement, logged as [tickprobe], never used for
+    # the release. OFF by default and deliberately not tied to `debug`: it
+    # runs a cvtColor + connectedComponents mid-shot, inside the tracking
+    # loop that is pure release latency on a 6-thread CPU. It already answered
+    # the question it was added for (see bar_len_px), so it should only come
+    # back on to re-measure the tick after a meter/resolution/HUD change.
+    "tick_probe": False,
     "debug": True,
 }
 
@@ -128,6 +364,21 @@ try:
 except OSError:
     pass
 
+# Priority names accepted in the config, mapped to the Win32 constants.
+# HIGH_PRIORITY_CLASS puts this process above every thread 2K26 owns; on a
+# CPU with a spare thread that is free, on a 6-thread one it is not.
+_PRIORITY_CLASSES = {
+    "normal": 0x00000020,
+    "above_normal": 0x00008000,
+    "high": 0x00000080,
+}
+_THREAD_PRIORITIES = {
+    "normal": 0,
+    "above_normal": 1,
+    "highest": 2,
+    "time_critical": 15,
+}
+
 
 def _clamp_config(cfg: dict) -> dict:
     def _num(key, default, lo, hi):
@@ -140,8 +391,12 @@ def _clamp_config(cfg: dict) -> dict:
 
     _num("hold_ms", 650, 100, 3000)
     _num("no_meter_ms", 400, 100, 1500)
-    _num("spin_margin_ms", 3.0, 0.0, 50.0)
+    _num("spin_margin_ms", 1.0, 0.0, 50.0)
     _num("latency_ms", 60, 0, 300)
+    _num("lead_px", 0, 0, 60)
+    _num("lead_v_ref", 0.29, 0.0, 1.0)
+    _num("lead_v_gain", 150.0, 0.0, 600.0)
+    _num("lead_v_max", 6.0, 0.0, 30.0)
     _num("release_pct", 97, 50, 100)
     _num("min_lead_pct", 82, 50, 100)
     _num("fast_min_lead_pct", 88, 50, 100)
@@ -149,6 +404,7 @@ def _clamp_config(cfg: dict) -> dict:
     _num("meter_lead_ms", 0, 0, 200)
     _num("meter_max_ms", 1200, 600, 2500)
     _num("persistent_span", 118, 20, 500)
+    _num("bar_len_px", 116, 0, 400)
     _num("arrow_ratio", 1.227, 1.0, 2.0)
     _num("lookahead_ms", 25, 0, 60)
     _num("v_long_weight", 0.75, 0.0, 1.0)
@@ -160,6 +416,26 @@ def _clamp_config(cfg: dict) -> dict:
     _num("autotune_target_ms", 12, -40, 40)
     _num("trust_min_frames", 8, 2, 60)
     _num("trust_min_span", 95, 40, 200)
+    _num("cv_threads", 1, 0, 16)
+    _num("poll_sleep_ms", 0.8, 0.0, 10.0)
+    _num("post_measure_ms", 0, 0, 400)
+    _num("mag_rb_min", 160, 80, 255)
+    _num("mag_g_max", 105, 0, 200)
+    _num("locate_band_lo", 0.60, 0.0, 0.95)
+    _num("locate_band_hi", 0.90, 0.05, 1.0)
+    _num("locate_full_after_ms", 220, 0, 1200)
+    _num("ab_alpha", 0.30, 0.02, 1.0)
+    _num("ab_beta", 0.105, 0.0, 1.0)
+    if cfg["locate_band_hi"] <= cfg["locate_band_lo"]:
+        cfg["locate_band_lo"] = DEFAULT_CONFIG["locate_band_lo"]
+        cfg["locate_band_hi"] = DEFAULT_CONFIG["locate_band_hi"]
+    cfg["mask_bgr"] = bool(cfg.get("mask_bgr", DEFAULT_CONFIG["mask_bgr"]))
+    vf = str(cfg.get("v_filter", DEFAULT_CONFIG["v_filter"])).strip().lower()
+    cfg["v_filter"] = vf if vf in ("ab", "lsq") else DEFAULT_CONFIG["v_filter"]
+    for _pk, _pmap in (("process_priority", _PRIORITY_CLASSES),
+                       ("vision_priority", _THREAD_PRIORITIES)):
+        pv = str(cfg.get(_pk, DEFAULT_CONFIG[_pk])).strip().lower()
+        cfg[_pk] = pv if pv in _pmap else DEFAULT_CONFIG[_pk]
     cfg["autotune"] = bool(cfg.get("autotune", DEFAULT_CONFIG["autotune"]))
     cfg["v_lsq"] = bool(cfg.get("v_lsq", DEFAULT_CONFIG["v_lsq"]))
     cfg["frame_align"] = bool(cfg.get("frame_align", DEFAULT_CONFIG["frame_align"]))
@@ -217,23 +493,36 @@ try:
 except Exception:
     pass
 
-HIGH_PRIORITY_CLASS = 0x00000080
 try:
     _k32 = ctypes.windll.kernel32
-    _k32.SetPriorityClass(_k32.GetCurrentProcess(), HIGH_PRIORITY_CLASS)
+    _k32.SetPriorityClass(
+        _k32.GetCurrentProcess(),
+        _PRIORITY_CLASSES[config["process_priority"]])
 except Exception:
     pass
 
 THREAD_PRIORITY_TIME_CRITICAL = 15
 
 
-def _boost_current_thread() -> None:
+def _boost_current_thread(level: int = THREAD_PRIORITY_TIME_CRITICAL) -> None:
     try:
         h = ctypes.windll.kernel32.GetCurrentThread()
-        ctypes.windll.kernel32.SetThreadPriority(
-            h, THREAD_PRIORITY_TIME_CRITICAL)
+        ctypes.windll.kernel32.SetThreadPriority(h, level)
     except Exception:
         pass
+
+
+def _vision_thread_priority() -> int:
+    """Priority the meter-tracking loop runs at between shots.
+
+    The loop polls for ~400 ms per shot. At TIME_CRITICAL that outranks
+    2K26's own render and input threads for the whole of it, on a CPU with
+    six threads and no SMT to absorb it — the stutter that costs is the one
+    that moves the frame we are trying to read. Only the final wait needs to
+    win a scheduling fight, and `_release` boosts for exactly that long.
+    """
+    return _THREAD_PRIORITIES.get(config.get("vision_priority",
+                                             "above_normal"), 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,10 +571,20 @@ class PrecisionWaiter:
 
     def wait_until(self, deadline: float, margin_ms: float) -> None:
         coarse = deadline - margin_ms / 1000.0 - time.perf_counter()
-        if coarse > 0:
+        # Below ~0.5 ms the timer's own granularity is the whole wait, so the
+        # syscall buys nothing over spinning the last stretch out.
+        if coarse > 0.0005:
             self._coarse(coarse)
         while time.perf_counter() < deadline:
             pass
+
+    def close(self) -> None:
+        if self._timer:
+            try:
+                ctypes.windll.kernel32.CloseHandle(self._timer)
+            except Exception:
+                pass
+            self._timer = None
 
 
 # --------------------------------------------------------------------------- #
@@ -500,6 +799,24 @@ class MeterEye:
     # fill speed, firing the release early. Kept tight around the real hue.
     MAG_LO = (146, 120, 150)
     MAG_HI = (157, 255, 255)
+    # The same fill, expressed directly in the captured buffer's own channels
+    # so no colour conversion is needed at all. Magenta is high blue + high
+    # red + low green, and because the blue and red bounds are IDENTICAL the
+    # box is channel-order agnostic — it matches BGR, RGB, BGRA and RGBA
+    # alike, which is what lets one mask serve both capture backends.
+    #
+    # Grid-searched against the HSV mask over 63 real 2K26 frames: identical
+    # fill front on 60 of them, worst case 1 px, never a miss, and 1.8 stray
+    # pixels per frame inside the search band (largest stray blob 45 px
+    # against the bar's ~2900). On the 1600x270 band that is 0.40 ms versus
+    # 1.30 ms for cvtColor+inRange.
+    #
+    # Doing the same predicate exactly, as numpy vector ops on the split
+    # channels, was tried and is a trap: 27 ms, eleven times SLOWER than the
+    # HSV path, because a dozen elementwise temporaries over 1.4 Mpx is all
+    # memory traffic. cv2.inRange is one SIMD pass and no allocation.
+    MAG_RB_MIN = 160             # blue AND red at least this
+    MAG_G_MAX = 105              # green below this
     TICK_LO = (45, 60, 90)       # green tick: measured H 53-65
     TICK_HI = (80, 255, 255)
     BAR_FRAC = 0.082             # bar length / window width (measured)
@@ -514,8 +831,60 @@ class MeterEye:
         self.last = "idle"
         self.persistent_span = 118  # Learned default span for player's custom meter size
         self._tick_span = None      # per-shot fill->tick distance (scales)
+        # One waiter for the life of the thread. This used to be built inside
+        # _release, which leaked a kernel timer handle on every single shot.
+        self._waiter = PrecisionWaiter()
+        self._mbuf = {}             # region size -> reused mask array
+        self._bnd = None            # cached (channels, lo, hi) -> inRange bounds
         threading.Thread(target=self._run, name="metereye",
                          daemon=True).start()
+
+    # ---------------------------------------------------------------- vision
+    def _bounds(self, nch: int):
+        """inRange bounds for a buffer with `nch` channels, cached."""
+        lo = int(config.get("mag_rb_min", self.MAG_RB_MIN))
+        hi = int(config.get("mag_g_max", self.MAG_G_MAX))
+        key = (nch, lo, hi)
+        cached = self._bnd
+        if cached is None or cached[0] != key:
+            if nch == 4:
+                val = ((lo, 0, lo, 0), (255, hi, 255, 255))
+            else:
+                val = ((lo, 0, lo), (255, hi, 255))
+            self._bnd = cached = (key, val)
+        return cached[1]
+
+    def _mask(self, buf):
+        """Magenta mask for a captured buffer, into a reused output array.
+
+        Never slices the alpha channel off first: `buf[:, :, :3]` is a
+        strided view and forcing it contiguous costs 2.6 ms on the search
+        band, six times the mask itself. inRange takes the 4-channel buffer
+        as it comes.
+        """
+        h, w = buf.shape[0], buf.shape[1]
+        nch = buf.shape[2] if buf.ndim == 3 else 1
+        out = self._mbuf.get((h, w))
+        if out is None:
+            out = _np.empty((h, w), _np.uint8)
+            if len(self._mbuf) >= 8:        # only a handful of sizes recur
+                self._mbuf.pop(next(iter(self._mbuf)))
+            self._mbuf[(h, w)] = out
+        if config.get("mask_bgr", True):
+            lo, hi = self._bounds(nch)
+            _cv2.inRange(buf, lo, hi, dst=out)
+        else:
+            src = buf[:, :, :3] if nch == 4 else buf
+            _cv2.inRange(_cv2.cvtColor(src, _cv2.COLOR_BGR2HSV),
+                         self.MAG_LO, self.MAG_HI, dst=out)
+        return out
+
+    @staticmethod
+    def _pace() -> None:
+        """Give the core back while waiting for the next rendered frame."""
+        s = float(config.get("poll_sleep_ms", 0.8)) / 1000.0
+        if s > 0:
+            time.sleep(s)
 
     def arm(self, press_time: float) -> None:
         self._press = press_time
@@ -541,16 +910,29 @@ class MeterEye:
             return None
 
     def _grab(self, camera, sct, x, y, w, h):
+        """Raw BGRA capture of the region, or None if there is no NEW frame.
+
+        dxcam is a Desktop Duplication client: it hands over a frame only
+        when the desktop actually changed, and returns None otherwise. This
+        used to fall straight through to a full mss BitBlt on every one of
+        those Nones — and mss costs 6.9 ms for even the small tracking crop,
+        18.6 ms for the whole window. That is the entire explanation for the
+        6.0 ms loop interval in the logs: over half of all iterations were
+        re-capturing, on the CPU, pixels the GPU had already told us had not
+        changed.
+
+        Returning None instead is both cheaper and more accurate. Every
+        frame that does arrive is now a genuinely new rendered frame, so the
+        fill's staircase steps line up with real frame boundaries instead of
+        being smeared across duplicate reads.
+        """
         if camera is not None:
-            region = (int(x), int(y), int(x + w), int(y + h))
-            frame = camera.grab(region=region)
-            if frame is not None:
-                return _cv2.cvtColor(frame, _cv2.COLOR_RGB2HSV)
+            return camera.grab(region=(int(x), int(y),
+                                       int(x + w), int(y + h)))
         shot = sct.grab({"left": int(x), "top": int(y),
                          "width": int(w), "height": int(h)})
-        img = _np.frombuffer(shot.bgra, _np.uint8).reshape(
-            shot.height, shot.width, 4)[:, :, :3]
-        return _cv2.cvtColor(img, _cv2.COLOR_BGR2HSV)
+        return _np.frombuffer(shot.raw, _np.uint8).reshape(
+            shot.height, shot.width, 4)
 
     def _autotune(self, over_ms: float) -> None:
         """Nudge latency_ms from measured overshoot.
@@ -653,24 +1035,69 @@ class MeterEye:
                     best_tick = x_from + int(xs.mean())
         return best_tick
 
-    def _locate(self, camera, sct, rect):
+    def _locate(self, camera, sct, rect, full=False):
         """Find the purple bar. Returns
-        ((bar_y0, bar_y1, front_x, end_x) or None, n_magenta_blobs)."""
+        ((bar_y0, bar_y1, front_x, end_x) or None, n_magenta_blobs).
+
+        n_magenta_blobs is -1 when the backend had no new frame, so the
+        caller can tell "nothing on screen" apart from "nothing to look at
+        yet" — only the first of those is evidence there is no meter.
+
+        Searches a horizontal BAND, not the whole window. Which axis to cut
+        is not a guess: across 966 logged detections the bar appeared
+        anywhere from x=68 to x=1443 of 1600, so horizontally it really is
+        the full width and a centred crop would throw away about half of all
+        shots. Vertically it is tight — every one of 63 confirmed bars sat
+        between 0.649 and 0.853 of window height — so the default 0.60-0.90
+        band drops 70% of the pixels with two bar-heights of margin at each
+        edge, and `locate_full_after_ms` widens to the whole window if the
+        band ever does come up empty.
+
+        Full window, HSV, label everything:  12.3 ms single-threaded.
+        Band, BGR box, label only the rows that carry magenta:  0.64 ms.
+        """
         gx, gy, gw, gh = rect
-        hsv = self._grab(camera, sct, gx, gy, gw, gh)
-        m = _cv2.inRange(hsv, self.MAG_LO, self.MAG_HI)
-        ncc, lab, st, ce = _cv2.connectedComponentsWithStats(m)
+        if full:
+            by0, bh = 0, gh
+        else:
+            by0 = max(0, min(gh - 40,
+                             int(gh * float(config.get("locate_band_lo",
+                                                       0.60)))))
+            bh = max(40, min(gh - by0,
+                             int(gh * float(config.get("locate_band_hi",
+                                                       0.90))) - by0))
+        buf = self._grab(camera, sct, gx, gy + by0, gw, bh)
+        if buf is None:
+            return None, -1
+        m = self._mask(buf)
+        # While the meter is not up yet there is nothing bar-sized on screen,
+        # and that is almost every iteration of the search. Bailing here for
+        # the price of one countNonZero is what makes the loop affordable.
+        if _cv2.countNonZero(m) < 40:
+            return None, 0
+        # Something magenta is up: narrow to the rows carrying it before
+        # paying for connected components. The threshold has to stay low —
+        # a fill that has only just appeared is a few px wide, so its rows
+        # hold only a few magenta pixels each.
+        rows = _cv2.reduce(m, 1, _cv2.REDUCE_SUM, dtype=_cv2.CV_32S)
+        idx = _np.nonzero(rows[:, 0] >= 3 * 255)[0]
+        if idx.size == 0:
+            return None, 0
+        r0 = max(0, int(idx[0]) - 4)
+        r1 = min(m.shape[0], int(idx[-1]) + 5)
+        ncc, lab, st, ce = _cv2.connectedComponentsWithStats(m[r0:r1])
         cands = []
         for i in range(1, ncc):
             x, y, w, h, a = st[i]
             if a >= 40 and 8 <= h <= 45 and w >= 3 and w <= 220:
                 cands.append((a, x, y, w, h))
-        
+
         span_px = float(config.get("persistent_span", 118))
         for a, x, y, w, h in sorted(cands, reverse=True)[:3]:
             solid = a / max(w * h, 1)
             if 12 <= h <= 40 and solid >= 0.70:
                 end = x + int(span_px)
+                y += r0 + by0          # band coords -> window coords
                 return (y - 6, y + h + 6, x + w, end), len(cands)
         return None, len(cands)
 
@@ -683,35 +1110,68 @@ class MeterEye:
         
         # Fast-path: cancel the background worker thread and release directly
         self.worker.cancel()
-        
-        # High-precision wait in this thread (since it's already time-critical)
-        waiter = PrecisionWaiter()
-        waiter.wait_until(target, float(config["spin_margin_ms"]))
-        
-        t_rel = time.perf_counter()
-        _inject_release()
-        
+
+        # Outrank the game for the wait and the injection, and only for
+        # those. The tracking loop that got us here runs a notch above
+        # normal — see _vision_thread_priority.
+        _boost_current_thread(THREAD_PRIORITY_TIME_CRITICAL)
+        try:
+            # Hold the invariant by construction, not by config discipline:
+            # once the release is committed we must not block, because being
+            # rescheduled onto a core is what produced every late outlier.
+            # wait_s <= lookahead_ms, so spinning that whole window means
+            # _coarse() is never reached on the LEAD path even if someone
+            # tunes spin_margin_ms down or lookahead_ms up.
+            guard_ms = float(config.get("lookahead_ms", 25)) + 1.0
+            if config.get("frame_align", False):
+                # frame_align can push wait_s up to half a frame past the
+                # lookahead bound, so the no-block window has to cover it too.
+                guard_ms += float(config.get("game_frame_ms", 15.0)) / 2.0
+            spin_ms = max(float(config["spin_margin_ms"]), guard_ms)
+            self._waiter.wait_until(target, spin_ms)
+            t_rel = time.perf_counter()
+            _inject_release()
+        finally:
+            _boost_current_thread(_vision_thread_priority())
+
         held = (t_rel - press) * 1000.0
         err = held - (target - press) * 1000.0
         stats.record(err)
-        
+
         self.last = f"{why} {t_anchor*1000:.0f} ms"
         if config["debug"]:
-            log.info("[meter] %s at %.0f ms -> released directly at %.2f ms (err %+.2f ms)",
+            log.info("[meter] %s at %.0f ms -> released at %.2f ms (err %+.2f ms)",
                      why, t_anchor * 1000, (t_rel - press) * 1000, err)
 
     def _run(self) -> None:
-        _boost_current_thread()
+        _boost_current_thread(_vision_thread_priority())
         try:
             ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+        # Keep OpenCV on one core. By default it fans every cvtColor,
+        # inRange and connectedComponents out across all six, which on a
+        # 6-thread CPU means the vision pass briefly owns the whole machine
+        # — and the work below is now small enough that thread hand-off
+        # costs more than it saves (the banded search measured 0.64 ms on
+        # one thread against 0.87 ms on six).
+        try:
+            nt = int(config.get("cv_threads", 1))
+            if nt > 0:
+                _cv2.setNumThreads(nt)
         except Exception:
             pass
         camera = None
         if not config.get("force_mss", False):
             try:
                 import dxcam
-                camera = dxcam.create()
-                log.info("[capture] backend: dxcam (GPU)")
+                # BGRA so both backends hand back the same 4-channel layout
+                # and one mask path serves them, with no conversion either
+                # side. A 3-channel frame would need its alpha re-added or
+                # its stride fixed before inRange, and both cost more than
+                # the mask.
+                camera = dxcam.create(output_color="BGRA")
+                log.info("[capture] backend: dxcam (GPU, BGRA)")
             except Exception as e:
                 log.info("[capture] dxcam initialization failed: %s (falling back to mss)", e)
                 camera = None
@@ -782,6 +1242,16 @@ class MeterEye:
         # both divide by v, that fired the release early on every left-side
         # shot. front - left cancels the translation out.
         fw_at_found = None
+        # DIAGNOSTIC ONLY — never feeds the release. bar_len_px is a hardcoded
+        # guess because the real measurement (_find_tick) has always been dead
+        # code, so we cannot tell a mistuned constant apart from a target that
+        # legitimately moves shot to shot. This probes the green tick ONCE per
+        # shot and logs where it actually is. If tick_len is stable across
+        # shots, a constant is the right shape and only its value is wrong; if
+        # it wanders, no constant can ever be right and the target has to be
+        # measured per shot. Costs one cvtColor + one CC pass on a small crop,
+        # once per shot, and only when the tick_probe flag is on.
+        tick_probed = False
         t_fw = None
         prev_fill_w = None     # staircase step tracking (see fill_est)
         step_gaps = []         # observed gaps between fill steps = game frames
@@ -794,6 +1264,12 @@ class MeterEye:
         # through every sample averages the staircase out instead.
         lsq_n = 0
         lsq_sx = lsq_sy = lsq_sxx = lsq_sxy = 0.0
+        # Alpha-beta tracker over the same fill length: two scalars of state,
+        # one update per frame, no history. See the update below for why it
+        # beats the fit.
+        ab_x = None            # smoothed fill length, px
+        ab_v = 0.0             # fill speed, px/ms
+        ab_t = None
         last_step_fill = None  # fill at the last REAL (>=2px) advance
         last_step_t = None
         fill_at_step = None
@@ -806,9 +1282,19 @@ class MeterEye:
             if now >= guard:
                 self.last = ("meter never found" if lock is None
                              else "no release signal")
-                log.warning("[meter] %s — safety release at %d ms "
+                # Do not simply return: the worker's own deadline is
+                # meter_max_ms, so returning here holds K for the full
+                # 1200 ms — nearly twice a normal shot and a guaranteed
+                # Late. Nothing better is knowable this late, so release
+                # now instead of sitting on the remaining 60 ms.
+                if not gave_up:
+                    try:
+                        self.worker.retarget(now + 0.005)
+                    except Exception:
+                        log.exception("[meter] guard retarget failed")
+                log.warning("[meter] %s — safety release at %.0f ms "
                             "(last front %d tick %d)",
-                            self.last, int(config["meter_max_ms"]),
+                            self.last, (now - press) * 1000.0,
                             dbg[0], dbg[1])
                 return
             if lock is None:
@@ -821,33 +1307,53 @@ class MeterEye:
                 if now - press < 0.080:  # Ignore first 80ms to avoid fading meters or quick false locks
                     time.sleep(0.002)
                     continue
-                found, ncand = self._locate(camera, sct, rect)
+                # Give the band its chance, then widen. A meter outside the
+                # band costs a slightly later lock, never a lost shot.
+                found, ncand = self._locate(
+                    camera, sct, rect,
+                    full=(now - press) * 1000.0
+                    > float(config.get("locate_full_after_ms", 220)))
+                if ncand < 0:            # backend has no new frame yet
+                    self._pace()
+                    continue
                 cands_seen = max(cands_seen, ncand)
                 if found:
                     lock = found
                     seen = 1
                     t_found = now
                     front_at_found = found[2]
-                    # The meter renders larger when the player is nearer the
-                    # camera (span ~110 close, ~106 far). fill_w and v are in
-                    # real pixels and scale with it, so a fixed target length
-                    # is short on big meters (early) and long on small ones
-                    # (late). Scale the arrow target by the span we just
-                    # measured instead.
+                    # `found[3] - found[2]` is NOT a measurement of the meter.
+                    # _locate returns found[3] = fill_left + persistent_span,
+                    # a constant, so this difference is just
+                    # `persistent_span - fill_width_at_lock`. Kept only to
+                    # feed the legacy bar_len_px<=0 path.
                     _ts = found[3] - found[2]
                     self._tick_span = _ts if 60 <= _ts <= 200 else None
                     if config["debug"]:
+                        # bar_h is the one real scale signal available here
+                        # (found = (y-6, y+h+6, ...)). If the meter genuinely
+                        # renders bigger up close, THIS is what moves — log it
+                        # so a future session can answer that from data
+                        # instead of scaling off lock-timing noise.
+                        _bar_h = found[1] - found[0] - 12
                         log.info("[meter] purple bar found at +%.0f ms "
-                                 "(fill %d -> tick %d, span %d, target %d)",
-                                 (now - press) * 1000,
-                                 found[2], found[3], found[3] - found[2],
-                                 int((found[3] - found[2])
-                                     * float(config.get("arrow_ratio", 1.227)))
-                                 if self._tick_span
-                                 else int(config.get("persistent_span", 130)))
+                                 "(fill %d, w_at_lock %d, bar_h %d, "
+                                 "target_len %g)",
+                                 (now - press) * 1000, found[2],
+                                 int(config.get("persistent_span", 118)) - _ts,
+                                 _bar_h,
+                                 float(config.get("bar_len_px", 116)))
                 elif (not gave_up
-                      and now - press > float(config["no_meter_ms"]) / 1000.0
-                      and cands_seen == 0):
+                      and now - press > float(config["no_meter_ms"]) / 1000.0):
+                    # No LOCK this shot. Deliberately not gated on
+                    # `cands_seen == 0` any more: magenta on screen that
+                    # never passes the solidity/height test is not a meter
+                    # we can time, and treating it as "still coming" armed
+                    # no fallback at all — the shot then rode the 1200 ms
+                    # safety hold, which 2K scores a hard Late. Seen in a
+                    # log where the bar locked at +348 ms, was lost before
+                    # a single tracked frame, and every re-locate after it
+                    # produced rejected candidates only.
                     # No meter this shot. Fall back to a normal-length hold
                     # anchored on the PRESS, not on the moment we gave up —
                     # otherwise the give-up delay is added to the hold and
@@ -856,9 +1362,9 @@ class MeterEye:
                     self.worker.retarget(max(target, now + 0.005))
                     self.last = "no meter — quick abort"
                     if config["debug"]:
-                        log.info("[meter] no meter within %d ms — holding "
-                                 "%d ms total (release in %.0f ms)",
-                                 int(config["no_meter_ms"]),
+                        log.info("[meter] no lock within %d ms (cands %d) — "
+                                 "holding %d ms total (release in %.0f ms)",
+                                 int(config["no_meter_ms"]), cands_seen,
                                  int(config["hold_ms"]),
                                  (target - now) * 1000.0)
                     # Arm the fallback but KEEP LOOKING. The release isn't
@@ -878,18 +1384,26 @@ class MeterEye:
             cx1 = min(gw, target_x + 35)
             cy0 = max(0, band_y0 - 20)
             cy1 = min(gh, band_y1 + 20)
-            hsv = self._grab(camera, sct, gx + cx0, gy + cy0,
+            buf = self._grab(camera, sct, gx + cx0, gy + cy0,
                              cx1 - cx0, cy1 - cy0)
+            if buf is None:
+                # No new rendered frame. Not a lost meter — the fill cannot
+                # have moved, so counting it as one would trip the
+                # meter-lost release on a backend that is simply idle.
+                self._pace()
+                continue
             t_now = time.perf_counter() - press
-            m = _cv2.inRange(hsv, self.MAG_LO, self.MAG_HI)
-            npx = int(_np.count_nonzero(m))
+            m = self._mask(buf)
+            npx = _cv2.countNonZero(m)
             if npx >= 25:
                 seen += 1
                 lost = 0
-                xs = _np.nonzero(m.any(axis=0))[0]
-                ys = _np.nonzero(m.any(axis=1))[0]
-                front = cx0 + int(xs.max())
-                left = cx0 + int(xs.min())
+                # One pass for the whole bounding box: same numbers as the
+                # two np.nonzero(any(...)) reductions this replaces, 0.020 ms
+                # against 0.140 ms for the old mask-and-scan.
+                _bx, _by, _bw, _bh = _cv2.boundingRect(m)
+                front = cx0 + _bx + _bw - 1
+                left = cx0 + _bx
                 # Fill LENGTH, not front position — see fw_at_found above.
                 fill_w = front - left
                 if fw_at_found is None:
@@ -910,13 +1424,51 @@ class MeterEye:
                 if now - t_fw > 0.150 and fill_w - fw_at_found < 8:
                     self._release(press, t_now, "static lock-on abort", 0)
                     return
-                band_y0 = cy0 + int(ys.min()) - 20
-                band_y1 = cy0 + int(ys.max()) + 20
-                if getattr(self, "_tick_span", None):
-                    expected_len = (float(self._tick_span)
-                                    * float(config.get("arrow_ratio", 1.227)))
-                else:
-                    expected_len = float(config.get("persistent_span", 130))
+                band_y0 = cy0 + _by - 20
+                band_y1 = cy0 + _by + _bh - 1 + 20
+                # Fixed target length — see bar_len_px in DEFAULT_CONFIG for
+                # why this must NOT be derived from the lock-time span.
+                # `left` is still tracked live every frame, so the target
+                # keeps riding the camera pan; only its LENGTH is constant.
+                expected_len = float(config.get("bar_len_px", 116))
+                if expected_len <= 0:            # legacy per-shot scaling
+                    expected_len = (
+                        float(self._tick_span)
+                        * float(config.get("arrow_ratio", 1.227))
+                        if getattr(self, "_tick_span", None)
+                        else float(config.get("persistent_span", 130)))
+                # --- tick probe (diagnostic, see tick_probed above) --------
+                # Fire once, past halfway: early on the fill the tick can sit
+                # outside the crop, and we want it while the bar is clearly
+                # on screen. Wrapped broadly — a probe that throws must never
+                # cost a shot, since nothing downstream depends on it.
+                if (config.get("tick_probe", False) and not tick_probed
+                        and expected_len > 0
+                        and fill_w >= 0.5 * expected_len):
+                    tick_probed = True
+                    try:
+                        _hsv = _cv2.cvtColor(buf, _cv2.COLOR_BGR2HSV)
+                        _tk = self._find_tick(_hsv, _bx + _bw + 2,
+                                              _hsv.shape[1],
+                                              _by, _by + _bh)
+                        if _tk is not None:
+                            # _find_tick returns crop coords; `left` is in
+                            # window coords, so lift the tick the same way
+                            # front/left were lifted before differencing.
+                            _tick_x = cx0 + _tk
+                            log.info("[tickprobe] tick at %d -> tick_len %d "
+                                     "(target_len %g, delta %+d px, "
+                                     "fill_w %d, bar_h %d)",
+                                     _tick_x, _tick_x - left, expected_len,
+                                     (_tick_x - left) - expected_len,
+                                     fill_w, _bh)
+                        else:
+                            log.info("[tickprobe] no green tick found "
+                                     "(fill_w %d, bar_h %d, scan %d..%d)",
+                                     fill_w, _bh, _bx + _bw + 2,
+                                     _hsv.shape[1])
+                    except Exception as exc:
+                        log.info("[tickprobe] failed: %r", exc)
                 target = left + expected_len
                 lock = (band_y0, band_y1, front, target)
                 dist = target - front
@@ -950,6 +1502,37 @@ class MeterEye:
                     fill_at_step = fill_w
                     t_step = now
                 remain = span - fill_w
+                # Alpha-beta tracker on the fill length. Predict where the
+                # fill should be, measure, correct position and speed by a
+                # fixed fraction of the miss. Two scalars, no history, no
+                # accumulators — and unlike the growing least-squares fit
+                # below it is not a whole-fill average, so it follows a fill
+                # whose speed changes instead of trailing it.
+                #
+                # Scored on release-time error against simulated fills
+                # (constant slow, constant fast, accelerating, decelerating,
+                # speed-kink at 250 ms), sampling one frame per render as
+                # the fixed capture path now does, the tracker beat the fit
+                # on all five. On the speed-kink it was 3.4 ms rms against
+                # the fit's 11.6 ms; on a constant fill 2.0 against 3.3.
+                # Gains from a sweep: alpha 0.30 with beta 0.105 gave the
+                # best worst-case (4.2 ms) and the best mean (3.1 ms).
+                #
+                # x_hat is also continuous between rendered frames, which is
+                # what `subframe_fill` was extrapolating by hand — when this
+                # filter is driving, that hack is redundant and skipped.
+                if ab_x is None:
+                    ab_x, ab_t, ab_v = float(fill_w), now, 0.0
+                else:
+                    _abdt = (now - ab_t) * 1000.0
+                    if _abdt > 0.5:
+                        ab_t = now
+                        _pred = ab_x + ab_v * _abdt
+                        _resid = fill_w - _pred
+                        ab_x = _pred + float(config.get("ab_alpha", 0.30)) * _resid
+                        ab_v = min(1.0, max(0.0, ab_v + (
+                            float(config.get("ab_beta", 0.105))
+                            / _abdt) * _resid))
                 # px/ms from the last few fill-length samples (60ms window)
                 lsq_n += 1
                 lsq_sx += t_now
@@ -1003,6 +1586,14 @@ class MeterEye:
                     v = self._last_v
                 else:
                     v = 0.30  # Default fallback
+                # Hand over to the tracker once it has settled. A few frames
+                # of warm-up matter: it starts at v=0 and the first residual
+                # is the whole fill, so an early reading is meaningless.
+                use_ab = (config.get("v_filter", "ab") == "ab"
+                          and seen >= 4 and 0.05 < ab_v < 1.0)
+                if use_ab:
+                    v = ab_v
+                    self._last_v = v
                 # The game renders at ~60 fps while we capture at ~200 Hz,
                 # so fill_w is a staircase: it holds for ~3 captures, then
                 # jumps ~5 px. Reading it raw means the fill is stale by
@@ -1014,7 +1605,12 @@ class MeterEye:
                 # from the last step keeps the estimate continuous
                 # instead of lagging the last drawn frame.
                 fill_est = fill_w
-                if (config.get("subframe_fill", True)
+                if use_ab:
+                    # x_hat already is the sub-frame estimate, updated at
+                    # this instant, so no extrapolation window to cap.
+                    fill_est = ab_x
+                    remain = span - fill_est
+                elif (config.get("subframe_fill", True)
                         and v > 0.05 and t_step is not None):
                     # Never extrapolate past one game frame: a missing
                     # step means the fill stopped, not that it kept going.
@@ -1024,6 +1620,24 @@ class MeterEye:
                     remain = span - fill_est
                 # Use the configured latency for both jumpshots and layups to keep timing consistent
                 lead_px = v * float(config["latency_ms"])
+                # lead_px > 0 overrides that with a FIXED pixel lead, i.e.
+                # release at a constant fill length whatever the speed. See
+                # the config entry: v*latency_ms is a lead in TIME, and it
+                # smears the release across ~3 px over the speed range this
+                # rig shoots, which is most of the good window.
+                _lp = float(config.get("lead_px", 0))
+                if _lp > 0:
+                    lead_px = _lp
+                    # Slow fills need MORE lead than a constant, even though
+                    # a constant already beats a lead in time. ONE-SIDED on
+                    # purpose: above lead_v_ref this adds nothing, so the
+                    # eight labelled greats at v 0.29-0.34 / 99.0 px cannot
+                    # be disturbed by it. See lead_v_gain in the config.
+                    _vr = float(config.get("lead_v_ref", 0.29))
+                    _vg = float(config.get("lead_v_gain", 150.0))
+                    if _vg > 0 and v < _vr:
+                        lead_px += min(float(config.get("lead_v_max", 6.0)),
+                                       _vg * (_vr - v))
                 cap_px = span * float(config["release_pct"]) / 100.0
                 # Stall detection: front has not advanced by more than 1px for at least 30ms near the end (>= 95% full)
                 stalled = False
@@ -1044,6 +1658,35 @@ class MeterEye:
                                                         88.0))) / 100.0
                 else:
                     min_lead_pct = base_min_pct / 100.0
+                # The floor is a FILL FRACTION, but it can only be tested on
+                # frames that actually arrive — so its effective position is
+                # up to one frame of fill past its nominal one. If that lands
+                # after the release point, `remain` is already below lead_px
+                # when the trigger fires, wait_s clamps to 0, and the flick
+                # goes out late by however far the frame overshot. It is
+                # visible in the log as `sched+0.0ms` on a LEAD release.
+                #
+                # Measured: floor 82% put the gate at 97.2 px against a
+                # 99.0 px release point — 1.8 px, half a frame at v0.277.
+                # One shot's first qualifying frame landed at 100.4 px and
+                # fired 1.4 px late; the shot before it qualified at 98.6 px
+                # and was fine. That is a coin flip decided by frame phase,
+                # so hold the invariant by construction instead of by
+                # config discipline: keep the floor at least one frame of
+                # fill clear of the release point. Only ever LOWERS the
+                # floor, and only when the geometry demands it — the
+                # lookahead term still bounds how early the trigger can go.
+                # THREE frames: one for frame phase, and two so a capture
+                # stall cannot push the first qualifying frame past the
+                # release point. Measured on the tempo build — a 14 ms stall
+                # on top of a 12.5 ms frame gap clamped the release ~6 px
+                # late, and 2 frames still clamped because lookahead_ms
+                # became the binding constraint instead. Must be kept in
+                # step with lookahead_ms; widening either alone does nothing.
+                _room = (span - lead_px
+                         - 3.0 * v * float(config.get("game_frame_ms", 13.4)))
+                if _room > 0:
+                    min_lead_pct = min(min_lead_pct, _room / span)
                 # Sub-frame scheduling: fire on the frame BEFORE the ideal
                 # crossing and schedule the release for the exact moment it
                 # happens. Waiting for `remain <= lead_px` meant the trigger
@@ -1062,51 +1705,58 @@ class MeterEye:
                     wait_s = 0.0
                     if lead_ready and v > 0:
                         wait_s = max(0.0, (remain - lead_px) / v / 1000.0)
-                    # Land in the MIDDLE of a game frame, not near its edge.
-                    #
-                    # 2K polls input once per rendered frame, so releasing
-                    # anywhere inside a frame gives the same result — only
-                    # which frame matters. Scheduling to a bare computed
-                    # instant can put us a hair from a boundary, where 3 ms
-                    # of pipeline jitter tips the release into the next
-                    # frame. That is not a 3 ms error, it is a full 16.7 ms
-                    # one, and it is what turns an Excellent into a Late
-                    # with nothing changed.
-                    #
-                    # Every step in fill_w IS a frame boundary, so t_step
-                    # gives us the phase for free. Shifting to frame centre
-                    # costs at most half a frame and buys ~8 ms of margin
-                    # on both sides.
-                    align_ms = 0.0
+                    # Measure the game's render period, every shot. Every step
+                    # in fill_w IS a frame boundary, so step_gaps is a direct
+                    # read of the render clock and needs no configured
+                    # constant. Measured unconditionally, because the phase
+                    # below is worth logging whether or not we align to it.
+                    frame = None
                     frame_ms = 0.0
                     frame_spread = "-"
-                    if (config.get("frame_align", True)
-                            and lead_ready and t_step is not None):
-                        _cfg_fr = float(config.get("game_frame_ms",
-                                                   13.3)) / 1000.0
-                        frame = _cfg_fr
-                        if len(step_gaps) >= 6:
-                            _sg = sorted(step_gaps)
-                            _med = _sg[len(_sg) // 2]
-                            # Only trust a measurement in a plausible band.
-                            # Outside it, something is polluting the steps
-                            # and the configured period is the safer bet.
-                            if 0.0100 <= _med <= 0.0230:
-                                frame = _med
-                            # Spread of the step gaps. A real render clock
-                            # is tight (p25~p50~p75); a wide spread means
-                            # something is splitting frames and the median
-                            # is an underestimate, not a frame time.
-                            _q = (_sg[len(_sg) // 4] * 1000.0,
-                                  _sg[len(_sg) * 3 // 4] * 1000.0)
-                            frame_spread = "%.1f/%.1f" % _q
+                    if len(step_gaps) >= 6:
+                        _sg = sorted(step_gaps)
+                        _med = _sg[len(_sg) // 2]
+                        # Spread of the step gaps. A real render clock is
+                        # tight (p25~p50~p75); a wide spread means something
+                        # is splitting frames and the median is an
+                        # underestimate, not a frame time.
+                        _q25 = _sg[len(_sg) // 4]
+                        _q75 = _sg[len(_sg) * 3 // 4]
+                        frame_spread = "%.1f/%.1f" % (_q25 * 1000.0,
+                                                      _q75 * 1000.0)
+                        if (0.0100 <= _med <= 0.0230
+                                and (_q75 - _q25) <= 0.0040):
+                            frame = _med
+                            frame_ms = _med * 1000.0
+                    # Snapping to frame centre is off by default and should
+                    # stay off — see frame_align in DEFAULT_CONFIG for why it
+                    # can only add frame flips, never remove them. Kept
+                    # switchable so the claim stays falsifiable in-game.
+                    align_ms = 0.0
+                    if (config.get("frame_align", False)
+                            and lead_ready and t_step is not None
+                            and frame is not None):
                         d = ((press + t_now + wait_s) - t_step) % frame
+                        # d < frame, so shift > -frame/2 always: it is the
+                        # NEAREST centre, never a whole frame away.
                         shift = frame / 2.0 - d
-                        if shift <= -frame / 2.0:
-                            shift += frame
+                        # Clamping to 0 loses the alignment, but only when
+                        # the aligned instant is already behind us — and then
+                        # we are still inside half a frame of it. Adding a
+                        # whole frame instead would be a guaranteed frame
+                        # late, which is far worse.
                         wait_s = max(0.0, wait_s + shift)
                         align_ms = shift * 1000.0
-                        frame_ms = frame * 1000.0
+                    # Where inside the frame the release lands, as a fraction
+                    # of it, measured from the last observed fill step. THIS
+                    # is the number that decides early vs late: the model says
+                    # it is near-constant across shots, and a miss is a shot
+                    # whose phase sat near 0.00/1.00 and let noise tip it over
+                    # the boundary. latency_ms shifts it; 0.5 is the target.
+                    phase = -1.0
+                    if frame is not None and t_step is not None:
+                        phase = (((press + t_now + wait_s) - t_step)
+                                 % frame) / frame
                     # How far the whole bar slid sideways since detection —
                     # this is the camera pan the old front-based velocity
                     # was mistaking for fill speed.
@@ -1119,45 +1769,59 @@ class MeterEye:
                     frame_dt = (active_ms / max(1, seen - 1)) if seen > 1 else 0.0
                     self._release(
                         press, t_now + wait_s,
-                        f"{why} {pct:.0f}% rem{remain}px "
+                        f"{why} {pct:.0f}% rem{remain:.1f}px "
                         f"v{v:.2f}px/ms comp{int(config['latency_ms'])}ms "
+                        f"lead{lead_px:.1f}px "
                         f"sched+{wait_s * 1000:.1f}ms x{int(left)} "
                         f"pan{pan_px:+.0f}px stall{stalls_ms:.0f}ms "
                         f"frm{seen} dt{frame_dt:.1f}ms sub{(fill_est - fill_w):+.1f}px "
                         f"align{align_ms:+.1f}ms fr{frame_ms:.1f}ms"
-                        f"[{frame_spread}]n{len(step_gaps)}",
+                        f"[{frame_spread}]n{len(step_gaps)} "
+                        f"ph{('%.2f' % phase) if phase >= 0 else '-'} "
+                        f"{'ab' if use_ab else 'lsq'}"
+                        f"{f' abx{ab_x:.1f}px abv{ab_v:.3f}' if ab_x is not None else ''}",
                         config["meter_offset_ms"])
                     
                     # --- Post-release latency & error measurement ---
+                    # Nothing here changes this shot: it measures where the
+                    # fill actually stopped, logs it, and feeds autotune.
+                    # It costs a solid `post_measure_ms` of capture right as
+                    # the shot animates, so it is off by default — set
+                    # post_measure_ms to ~150 to get the [overshoot] line
+                    # back while tuning, with or without autotune on.
+                    post_ms = float(config.get("post_measure_ms", 0))
+                    if post_ms <= 0:
+                        return
                     try:
                         t_inject = time.perf_counter()
-                        t_limit = t_inject + 0.150  # Grab for 150ms
+                        t_limit = t_inject + post_ms / 1000.0
                         post_hist = []
-                        
+
                         while time.perf_counter() < t_limit:
-                            hsv_post = self._grab(camera, sct, gx + cx0, gy + cy0, cx1 - cx0, cy1 - cy0)
+                            buf_post = self._grab(camera, sct, gx + cx0, gy + cy0, cx1 - cx0, cy1 - cy0)
+                            if buf_post is None:
+                                self._pace()
+                                continue
                             t_frame = time.perf_counter()
-                            m_post = _cv2.inRange(hsv_post, self.MAG_LO, self.MAG_HI)
-                            npx_post = int(_np.count_nonzero(m_post))
-                            if npx_post >= 25:
-                                xs_post = _np.nonzero(m_post.any(axis=0))[0]
-                                curr_front = cx0 + int(xs_post.max())
+                            m_post = self._mask(buf_post)
+                            if _cv2.countNonZero(m_post) >= 25:
+                                _px, _py, _pw, _ph = _cv2.boundingRect(m_post)
+                                curr_front = cx0 + _px + _pw - 1
                                 post_hist.append((t_frame, curr_front))
                             time.sleep(0.001)
-                            
+
                         if post_hist:
-                            # Robustly find when the bar stopped growing by finding the first stable frame
+                            # First frame the front never grows past again.
+                            # One reverse pass carrying the suffix maximum —
+                            # same answer as the old nested scan, which was
+                            # quadratic in the number of sampled frames.
                             stop_idx = None
-                            for i in range(len(post_hist)):
-                                is_stable = True
-                                for j in range(i + 1, len(post_hist)):
-                                    if post_hist[j][1] > post_hist[i][1] + 1:
-                                        is_stable = False
-                                        break
-                                if is_stable:
+                            suffix_max = -1 << 30
+                            for i in range(len(post_hist) - 1, -1, -1):
+                                if suffix_max <= post_hist[i][1] + 1:
                                     stop_idx = i
-                                    break
-                            
+                                suffix_max = max(suffix_max, post_hist[i][1])
+
                             if stop_idx is not None:
                                 t_observed = post_hist[stop_idx][0]
                                 max_pos = post_hist[stop_idx][1]
@@ -1270,12 +1934,34 @@ class MeterEye:
                 if seen >= 4 and lost >= 3:
                     self._release(press, t_now, "meter lost", 0)
                     return
+                if not gave_up and lost >= 3:
+                    # Locked, then lost the bar before we ever tracked it
+                    # (seen < 4, so the branch above cannot fire and the
+                    # fill estimate is worthless). Releasing here would be
+                    # early; doing nothing rode the 1200 ms guard and was
+                    # a hard Late. Arm the same press-anchored normal hold
+                    # the no-lock path uses and KEEP LOOKING — if the bar
+                    # comes back, tracking retargets over this.
+                    target = press + float(config["hold_ms"]) / 1000.0
+                    self.worker.retarget(max(target, now + 0.005))
+                    gave_up = True
+                    gave_up_at = target
+                    self.last = "lock lost — blind hold armed"
+                    if config["debug"]:
+                        log.info("[meter] lock lost after %d frames — "
+                                 "holding %d ms total (release in %.0f ms)",
+                                 seen, int(config["hold_ms"]),
+                                 (target - now) * 1000.0)
                 if lost >= 10:
                     lock = None
                     hist = []
                     seen = 0
                     lost = 0
-                    tick_age = 99
+                    # Whatever we re-lock onto is a fresh bar; carrying the
+                    # old length and speed into it would have the tracker
+                    # chasing a step change that never happened.
+                    ab_x = ab_t = None
+                    ab_v = 0.0
 
 
 worker = None
@@ -1354,9 +2040,17 @@ def _hook_impl(event, now: float) -> bool:
 # --------------------------------------------------------------------------- #
 # Config hot-reload
 # --------------------------------------------------------------------------- #
-_HOT_FIELDS = ("hold_ms", "no_meter_ms", "fast_min_lead_pct", "arrow_ratio", "lookahead_ms", "v_long_weight", "v_lsq", "stall_cap_ms", "subframe_fill", "step_cap_ms", "frame_align", "game_frame_ms", "autotune", "autotune_shots", "autotune_deadband_ms", "autotune_target_ms", "trust_min_frames", "trust_min_span", "spin_margin_ms", "latency_ms", "release_pct", "min_lead_pct",
+_HOT_FIELDS = ("hold_ms", "no_meter_ms", "fast_min_lead_pct", "arrow_ratio",
+               "bar_len_px", "persistent_span", "lookahead_ms", "v_long_weight", "v_lsq", "stall_cap_ms", "subframe_fill", "step_cap_ms", "frame_align", "game_frame_ms", "autotune", "autotune_shots", "autotune_deadband_ms", "autotune_target_ms", "trust_min_frames", "trust_min_span", "spin_margin_ms", "latency_ms", "lead_px", "lead_v_ref",
+               "lead_v_gain", "lead_v_max", "release_pct", "min_lead_pct",
                "meter_offset_ms", "meter_lead_ms", "meter_max_ms",
-               "predict", "force_mss", "debug")
+               "predict", "force_mss", "debug", "tick_probe",
+               # Tunable mid-session. cv_threads, process_priority and
+               # vision_priority are deliberately NOT here: they are applied
+               # once at thread start and a live change would not take.
+               "poll_sleep_ms", "post_measure_ms", "mask_bgr", "mag_rb_min",
+               "mag_g_max", "locate_band_lo", "locate_band_hi",
+               "locate_full_after_ms", "v_filter", "ab_alpha", "ab_beta")
 
 
 def _config_watcher() -> None:
@@ -1389,8 +2083,10 @@ def print_status() -> None:
     print("=" * 56)
     print(f"  Status    : {'ACTIVE' if active else 'PAUSED'}")
     print(f"  Key       : {config['action_key']}  (tap once)")
-    print(f"  Meter     : fire {int(config['latency_ms'])} ms before the "
-          f"shape fills  (cap {int(config['release_pct'])}%)")
+    _lp = float(config.get("lead_px", 0))
+    lead = f"{_lp:g} px" if _lp > 0 else f"{int(config['latency_ms'])} ms"
+    print(f"  Meter     : fire {lead} before the shape fills"
+          f"  (cap {int(config['release_pct'])}%)")
     print(f"  Safety    : {int(config['meter_max_ms'])} ms max hold"
           f"   engine spin {float(config['spin_margin_ms']):.1f} ms"
           f" {'high-res' if worker and worker.hr_timer else 'standard'}")
@@ -1492,9 +2188,13 @@ def main() -> None:
              "(F5 pause, F8 status, F9 quit)", prefix or "")
 
     print_status()
-    log.info("[start] K-Meter v%s ready — firing %d ms before the shape "
-             "fills. Tap '%s' to shoot.",
-             __version__, config["latency_ms"], config["action_key"])
+    log.info("[start] K-Meter v%s (button) ready — firing %s before the "
+             "shape fills. Tap '%s' to shoot.",
+             __version__,
+             (f"{float(config['lead_px']):g} px"
+              if float(config.get("lead_px", 0)) > 0
+              else f"{config['latency_ms']} ms"),
+             config["action_key"])
 
     try:
         _shutdown.wait()

@@ -19,12 +19,14 @@ This repository provides both **hardware-level timing interception** (Keyboard &
   - [2. Live Closed-Loop Feedback Tuning (`live_coach.py`)](#2-live-closed-loop-feedback-tuning-live_coachpy)
   - [3. Keyboard Precision Timer (`precision_timer.py`)](#3-keyboard-precision-timer-precision_timerpy)
   - [4. K2 Phase-Locked Render Clock Engine (`k2.py`)](#4-k2-phase-locked-render-clock-engine-k2py)
-  - [5. Vision Shot Meter Engine (`k_meter.py`)](#5-vision-shot-meter-engine-k_meterpy)
+  - [5. Vision Shot Meter Engine (`k_meter.py` — Tempo & Button builds)](#5-vision-shot-meter-engine-k_meterpy--tempo--button-builds)
   - [6. Gameplay Video Analysis (`tempo_learn.py` & `meter_watch.py`)](#6-gameplay-video-analysis-tempo_learnpy--meter_watchpy)
 - [Configuration Reference](#-configuration-reference)
 - [License & Disclaimer](#-license--disclaimer)
 
 ---
+
+## 🧭 Overview & Architecture
 
 > [!NOTE]
 > **Meter Target Specification**: The vision tracking algorithms (`k_meter/` suite) are specifically built, calibrated, and tuned for the **"Arrow 2"** shot meter style with **Purple** meter color located **below the player's feet** (horizontal purple fill bar racing into the green tick window at the tip).
@@ -35,6 +37,7 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 2. **Virtual Controller Injection**: Emulates an Xbox 360 controller via `vgamepad` and `ViGEmBus`, executing precise stick-down gather and upward flick release sequence while mirroring all other inputs.
 3. **Closed-Loop Realtime Tuning**: Uses Windows OCR (`winrt`) to read game feedback banners (*"Rushed"*, *"Slightly Rushed"*, *"Great Tempo"*, *"Slightly Late"*) and automatically adjusts hold parameters dynamically on the fly.
 4. **Phase-Locked Render Clock Fitting**: Models the 2K26 **Arrow 2 (Purple)** shot meter as a staircase function of rendered frames, performing least-squares linear fits to predict exact frame crossing times and overcome video capture jitter.
+5. **Dual-Output Vision Release**: One vision engine, two interchangeable output paths — a **TEMPO** build that drives the pro stick (down = tempo, flick up = release) and a **BUTTON** build that holds and releases the action key. Each carries its own tuning because the two input paths have very different latency.
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -59,6 +62,40 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 ---
 
 ## 📁 Comprehensive File & Directory Documentation
+
+```
+.
+├── live_coach.py               Closed-loop OCR tempo tuner
+├── precision_timer_pad.py      Controller rhythm-stick timing daemon
+├── precision_timer.py          Keyboard fixed-hold timing tool
+├── meter_watch.py              Offline video meter tracker
+├── tempo_learn.py              Offline OCR tempo analysis
+├── precision_timer_pad.json    ├─ configs
+├── precision_timer.json        │
+├── run_pad.bat / run_coach.bat / precision_timer.bat
+│
+├── k_meter/                    Vision & phase-locked suite
+│   ├── k2.py                   Render-clock staircase engine
+│   ├── k2_runtime.py           Live execution engine for k2
+│   ├── k2.json / run_k2.bat
+│   ├── vision_probe.py         YOLOv4 player/jersey probe
+│   ├── run_k_meter.bat         ◄ build picker: [1] TEMPO  [2] BUTTON
+│   │
+│   ├── tempo/                  ◄ TEMPO build (current)
+│   │   ├── k_meter.py            blocks K -> pro stick down, flick up
+│   │   ├── k_meter.json          latency_ms 60, lead_px 19.5
+│   │   └── run_k_meter.bat
+│   │
+│   ├── button/                 ◄ BUTTON build (preserved)
+│   │   ├── k_meter.py            holds K -> synthetic K-release
+│   │   ├── k_meter.json          latency_ms 11.5, lead_px 0, frame_align
+│   │   └── run_k_meter.bat
+│   │
+│   └── badges/                 Reference badge images
+│
+├── tempo_learn_out/            Analytics output
+└── meter_watch_out/            Analytics output
+```
 
 ### 1. Core Root Scripts
 
@@ -118,10 +155,29 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
   * **Description**: Live execution engine for `k2.py`.
   * **Mechanism**: Monitors game window focus, manages low-latency screen capture via `mss`, continuously feeds frame observations into `StaircaseClock`, and executes scancode key releases via Win32 `SendInput`.
 
-* [`k_meter/k_meter.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k_meter.py)
-  * **Description**: Vision-assisted keyboard auto-shot release tool for **Arrow 2** shot meter (v1.2).
-  * **Mechanism**: Tracks the horizontal purple meter fill racing into the green tick at the bar's tip using OpenCV HSV color space bounds. Implements velocity-based latency compensation and safe fallback timers.
-  * **Controls**: Operates via `Ctrl+Alt` hotkey combinations to avoid accidental keypresses.
+* **K-Meter — two builds, one vision engine**
+
+  `k_meter.py` now ships as **two sibling builds** that share the identical vision engine and differ only in what they *output* at the perfect moment. Each build lives in its own folder with its own `k_meter.json` tuning, because the two input paths need genuinely different lead values.
+
+  > [!WARNING]
+  > Never run both builds at once. They hook the same `K` key, register the same `Ctrl+Alt` F-key hotkeys, and are guarded by a single-instance mutex.
+
+  * [`k_meter/tempo/k_meter.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/tempo/k_meter.py) — **TEMPO (Pro Stick) build** *(current)*
+    * **Output**: The physical `K` press is **blocked** (it would fire a button shot). Instead **Pro Stick Down** is pressed and held — that hold *is* the tempo — and at the perfect moment the stick is flicked **UP** (stick-down released and stick-up pressed in one atomic input batch, then held `flick_hold_ms` so 2K registers the flick).
+    * **Keys**: Pro Stick Down = `.`, Pro Stick Up = `;` (configurable via `pro_stick_down_key` / `pro_stick_up_key`, matching `precision_timer.py` defaults).
+    * **Tuning**: `latency_ms` 60 with a pixel-based lead (`lead_px` 19.5) — a stick flick travels 2K's stick-input path and needs roughly 2.5× the lead of a key release.
+  * [`k_meter/button/k_meter.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/button/k_meter.py) — **BUTTON build** *(preserved lineage)*
+    * **Output**: The physical `K` press passes straight through to the game, the physical release is **suppressed**, and a synthetic `K`-release fires at the perfect moment.
+    * **Tuning**: `latency_ms` 11.5 with a purely time-based lead (`lead_px` 0) and `frame_align` enabled.
+
+  * **Shared mechanism**: Tracks the horizontal magenta/purple meter fill (H 150–151, bar ≈128×24 px at 1600×900) racing left-to-right into the fixed **green tick** (H 53–65) at the bar's tip. The release/flick is scheduled *predictively* from measured fill velocity (least-squares `v_lsq` fit plus an alpha-beta filter) with sub-ms injection.
+  * **Fallbacks**: meter lost mid-fill → fire immediately; no meter and no magenta on screen within `no_meter_ms` → fall back to a fixed `hold_ms` tempo from the press; hard safety cutoff at `meter_max_ms`; all-keys-up on exit so no stick key is ever left down.
+  * **Controls** (`Ctrl+Alt` prefixed, to avoid colliding with other tools):
+    * `Ctrl+Alt+F5` pause / resume (`K` behaves normally while paused)
+    * `Ctrl+Alt+F7` / `Ctrl+Alt+F6` latency ±10 ms (earlier / later)
+    * `Ctrl+Alt+F4` / `Ctrl+Alt+F3` latency ±3 ms fine trim
+    * `Ctrl+Alt+F8` status · `Ctrl+Alt+F10` reset stats · `Ctrl+Alt+F9` quit
+  * **Hot-reload**: `meter_offset_ms` and `meter_lead_ms` reload from `k_meter.json` live while running.
 
 * [`k_meter/vision_probe.py`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/vision_probe.py)
   * **Description**: Offline player detection and jersey color probe.
@@ -129,12 +185,14 @@ Shot timing in NBA 2K26 requires sub-millisecond precision. Server tick rates, j
 
 * [`k_meter/k2.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k2.json)
   * Configuration file for `k2.py` and `k2_runtime.py`. Controls `latency_ms`, `arrow_ratio` (calibrated for Arrow 2 green tip geometry), `hold_ms`, `min_steps`, `spin_ms`, and `no_meter_ms`.
-* [`k_meter/k_meter.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/k_meter.json)
-  * Configuration file for `k_meter.py`. Controls Arrow 2 HSV color bounds, ROI search boxes, lead times, and action key definitions.
+* [`k_meter/tempo/k_meter.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/tempo/k_meter.json) / [`k_meter/button/k_meter.json`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/button/k_meter.json)
+  * Per-build configuration for the two `k_meter.py` builds. Controls Arrow 2 magenta/green color bounds, ROI search bands, lead and latency values, velocity filtering, and action/pro-stick key definitions. The two files are deliberately tuned differently — do not copy values between them.
 * [`k_meter/run_k2.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/run_k2.bat)
   * Windows batch launcher for starting `k2_runtime.py`.
 * [`k_meter/run_k_meter.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/run_k_meter.bat)
-  * Windows batch launcher for starting `k_meter.py`.
+  * Interactive build picker. Prompts for `[1] TEMPO` or `[2] BUTTON` and chains to the matching sub-launcher, so you can never accidentally start both.
+* [`k_meter/tempo/run_k_meter.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/tempo/run_k_meter.bat) / [`k_meter/button/run_k_meter.bat`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/button/run_k_meter.bat)
+  * Direct launchers for the individual tempo and button builds.
 * [`k_meter/badges/`](file:///D:/Users/rodnee/Desktop/Dev/zxc/k_meter/badges)
   * Reference image assets (`early.png`, `excellent.png`, `slightly_early.png`, `slightly_late.png`) used for UI badge template matching and verification.
 
@@ -236,15 +294,32 @@ run_k2.bat
 
 ---
 
-### 5. Vision Shot Meter Engine (`k_meter.py`)
+### 5. Vision Shot Meter Engine (`k_meter.py` — Tempo & Button builds)
 
-Vision tracking for the horizontal purple shot meter:
+Vision tracking for the horizontal purple shot meter. Run the picker and choose a build:
 
 ```cmd
 cd k_meter
 run_k_meter.bat
 ```
-* Hotkeys operate with `Ctrl+Alt` prefix (e.g., `Ctrl+Alt+F6` / `Ctrl+Alt+F7` adjust latency).
+```
+   K-Meter - pick a build (never run both, they share the K hook)
+
+   [1]  TEMPO   blocks K, pro stick down then flick up   (current)
+   [2]  BUTTON  holds K and releases K                   (preserved)
+```
+
+Or launch a build directly:
+
+```cmd
+cd k_meter\tempo   &  run_k_meter.bat
+cd k_meter\button  &  run_k_meter.bat
+```
+
+* **Which to use**: TEMPO is the current build — it drives the pro stick (down = tempo, flick up = release), matching how rhythm shooting is played on a controller. BUTTON is the preserved keyboard lineage that simply holds and releases `K`.
+* Run as Administrator; do **not** run alongside `precision_timer.py` or `precision_timer_pad.py` (shared hotkeys and pro-stick keys).
+* Hotkeys operate with `Ctrl+Alt` prefix (e.g., `Ctrl+Alt+F6` / `Ctrl+Alt+F7` adjust latency, `Ctrl+Alt+F3` / `Ctrl+Alt+F4` fine trim ±3 ms).
+* After switching builds, re-trim `latency_ms` once — the stick-input path and key-release path do not share timing.
 
 ---
 
@@ -292,6 +367,40 @@ Analyze OBS recordings to evaluate shot timing consistency and gather statistics
   "min_steps": 6,
   "spin_ms": 3.0,
   "debug": true
+}
+```
+
+### `k_meter/tempo/k_meter.json` (Pro Stick build — key settings)
+```json
+{
+  "action_key": "k",
+  "pro_stick_down_key": ".",
+  "pro_stick_up_key": ";",
+  "flick_hold_ms": 80,
+  "flick_gap_ms": 40,
+  "latency_ms": 60,
+  "lead_px": 19.5,
+  "hold_ms": 650,
+  "no_meter_ms": 550,
+  "meter_max_ms": 1200,
+  "hotkey_prefix": "ctrl+alt+",
+  "game_window": "NBA 2K26"
+}
+```
+
+### `k_meter/button/k_meter.json` (Button build — key settings)
+```json
+{
+  "action_key": "k",
+  "latency_ms": 11.5,
+  "lead_px": 0,
+  "frame_align": true,
+  "game_frame_ms": 13.4,
+  "hold_ms": 650,
+  "no_meter_ms": 550,
+  "meter_max_ms": 1200,
+  "hotkey_prefix": "ctrl+alt+",
+  "game_window": "NBA 2K26"
 }
 ```
 
